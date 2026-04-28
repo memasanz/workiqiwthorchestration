@@ -1,0 +1,7 @@
+# Pin to the 1.x line because it exposes the classic AgentsClient via
+# project.agents (with create_agent / threads / runs). The 2.x line uses a
+# different versioned API that is not what these scripts target.
+azure-ai-projects==1.0.0
+# McpTool is only in the 1.2.0b* preview line.
+azure-ai-agents>=1.2.0b1
+azure-identity>=1.17.0
