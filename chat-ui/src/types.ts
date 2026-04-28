@@ -60,7 +60,16 @@ export interface ToolExecutedPayload {
   agent: AgentName;
   tool: string;
   ok: boolean;
+  call_id?: string;
   result_summary?: any;
+}
+
+export interface ToolCallStartedPayload {
+  turn: number;
+  agent: AgentName;
+  tool: string;
+  call_id: string;
+  args?: Record<string, any>;
 }
 
 export interface ToolRejectedPayload {
@@ -84,14 +93,22 @@ export interface ErrorPayload {
   message: string;
 }
 
+export interface AgentThinkingPayload {
+  turn: number;
+  agent: AgentName;
+  active: boolean;
+}
+
 export type SseEvent =
   | { type: "session_start"; data: SessionStartPayload }
   | { type: "router_decision"; data: RouterDecisionPayload }
   | { type: "agent_turn_start"; data: AgentTurnStartPayload }
+  | { type: "agent_thinking"; data: AgentThinkingPayload }
   | { type: "agent_message"; data: AgentMessagePayload }
   | { type: "tool_proposed"; data: ToolProposedPayload }
   | { type: "approval_required"; data: ApprovalRequiredPayload }
   | { type: "tool_executed"; data: ToolExecutedPayload }
+  | { type: "tool_call_started"; data: ToolCallStartedPayload }
   | { type: "tool_rejected"; data: ToolRejectedPayload }
   | { type: "participant"; data: ParticipantPayload }
   | { type: "final"; data: FinalPayload }
@@ -108,6 +125,7 @@ export interface TranscriptEntry {
     | "user"
     | "agent_message"
     | "tool_proposed"
+    | "tool_pending"
     | "tool_executed"
     | "tool_rejected"
     | "router_decision"

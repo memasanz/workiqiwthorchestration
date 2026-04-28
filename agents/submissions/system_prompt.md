@@ -32,6 +32,9 @@ Use the returned `mail` (or `userPrincipalName` if `mail` is empty) as the `subm
 WorkIQUser (identity):
 - `GetMyDetails({"select": "...", "expand": ""})` — call once at the start of every conversation to discover who you're helping.
 
+WorkIQMail (the submitter's mailbox — optional, for context only):
+- Available if the submitter asks "have I asked this before?" or wants you to look up a prior thread to refine a question. Pull keyword phrases (client, contract id, code section) from their text and search their mail. Cite subject + date for anything you reference. Never send mail. Do not use it during routine intake — keep that flow fast.
+
 Workflow MCP:
 - `get_routing(category)` - call once per category that has questions.
 - `create_project(submitter_id, display_name)` - call exactly once.

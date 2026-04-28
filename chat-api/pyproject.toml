@@ -1,6 +1,6 @@
 [project]
 name = "chat-api"
-version = "0.8.4"
+version = "0.8.7"
 description = "Microsoft Agent Framework FoundryAgent orchestrator binding the registered submissions/tax/legal Foundry Hosted Agents (responses-protocol passthrough) with per-agent AgentSession continuity for the multi-person workflow."
 requires-python = ">=3.12,<3.13"
 dependencies = [

@@ -25,7 +25,7 @@ export const msalInstance = new PublicClientApplication({
   },
   cache: {
     cacheLocation: "sessionStorage",
-    storeAuthStateInCookie: false,
+    storeAuthStateInCookie: true,
   },
   system: {
     loggerOptions: {

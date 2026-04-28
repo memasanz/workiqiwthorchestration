@@ -58,6 +58,28 @@ export function ChatView() {
             </div>
           );
         }
+        if (e.kind === "tool_pending") {
+          const p = e.payload || {};
+          const isThinking = !!p.thinking;
+          return (
+            <div key={e.id} className="msg msg-tool">
+              <div className="tool-card tool-card-pending">
+                <div className="tool-card-header" style={{ cursor: "default" }}>
+                  <span className="tool-spinner" aria-label="running" />
+                  <span>
+                    {isThinking ? (
+                      <>{e.agent} is working…</>
+                    ) : (
+                      <>
+                        {e.agent} calling <strong>{p.tool}</strong>…
+                      </>
+                    )}
+                  </span>
+                </div>
+              </div>
+            </div>
+          );
+        }
         if (e.kind === "tool_executed") {
           const p = e.payload || {};
           return (

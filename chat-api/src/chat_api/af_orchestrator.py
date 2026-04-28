@@ -399,6 +399,7 @@ async def _surface_function_results(ctx: _RuntimeCtx, response: Any) -> None:
                             "agent": ctx.agent_id,
                             "tool": meta["tool"],
                             "ok": ok,
+                            "call_id": call_id or None,
                             "approval_id": call_id or None,
                             "result": summary,
                             "result_summary": summary,
@@ -406,6 +407,40 @@ async def _surface_function_results(ctx: _RuntimeCtx, response: Any) -> None:
                         },
                     ),
                 )
+
+
+def _extract_function_calls(update: Any) -> list[dict[str, Any]]:
+    """Pull any FunctionCall/mcp_server_tool_call entries out of a streaming
+    update or a full response. Returns dicts with stable ``call_id`` so the
+    caller can dedupe across chunks."""
+    out: list[dict[str, Any]] = []
+    candidates: list[Any] = []
+    contents = getattr(update, "contents", None)
+    if contents:
+        candidates.extend(contents)
+    for m in getattr(update, "messages", None) or []:
+        for c in getattr(m, "contents", None) or []:
+            candidates.append(c)
+    for c in candidates:
+        ctype = type(c).__name__
+        ctype_str = getattr(c, "type", None)
+        is_call = ctype == "FunctionCallContent" or ctype_str in (
+            "function_call", "mcp_server_tool_call",
+        )
+        if not is_call:
+            continue
+        tool = getattr(c, "name", None) or getattr(c, "tool_name", None)
+        if not tool:
+            continue
+        call_id = getattr(c, "call_id", None) or getattr(c, "id", None) or ""
+        args = getattr(c, "arguments", None) or {}
+        if isinstance(args, str):
+            try:
+                args = json.loads(args)
+            except Exception:  # noqa: BLE001
+                args = {"_raw": args}
+        out.append({"call_id": call_id, "tool": tool, "args": args})
+    return out
 
 
 def _extract_text(response: Any) -> str:
@@ -534,6 +569,28 @@ async def run_turn(
     # today's UI contract while enabling token-level events for future use).
     text_buffers: dict[str, list[str]] = {}
     last_full_response: dict[str, Any] = {}
+    announced_calls: set[str] = set()
+    thinking_active: dict[str, bool] = {}
+
+    async def _emit_thinking(agent_id: str) -> None:
+        if thinking_active.get(agent_id):
+            return
+        thinking_active[agent_id] = True
+        log.info("emit agent_thinking active=True agent=%s turn=%d", agent_id, turn)
+        await store.publish(
+            session.session_id,
+            event("agent_thinking", {"turn": turn, "agent": agent_id, "active": True}),
+        )
+
+    async def _clear_thinking(agent_id: str) -> None:
+        if not thinking_active.get(agent_id):
+            return
+        thinking_active[agent_id] = False
+        log.info("emit agent_thinking active=False agent=%s turn=%d", agent_id, turn)
+        await store.publish(
+            session.session_id,
+            event("agent_thinking", {"turn": turn, "agent": agent_id, "active": False}),
+        )
 
     async def _flush_agent(agent_id: str) -> None:
         text = "".join(text_buffers.get(agent_id, [])).strip()
@@ -569,6 +626,7 @@ async def run_turn(
                     session.session_id,
                     event("agent_turn_start", {"turn": turn, "agent": agent_id}),
                 )
+                await _emit_thinking(agent_id)
 
             elif etype == "output" and eid in FOUNDRY_NAME_TO_AGENT and edata is not None:
                 agent_id = FOUNDRY_NAME_TO_AGENT[eid]
@@ -577,6 +635,7 @@ async def run_turn(
                 # Both expose .text (and a value attr / messages on Response).
                 chunk = _extract_text(edata)
                 if chunk:
+                    await _clear_thinking(agent_id)
                     text_buffers.setdefault(agent_id, []).append(chunk)
                     await store.publish(
                         session.session_id,
@@ -589,9 +648,31 @@ async def run_turn(
                 # can surface tool calls once the agent finishes.
                 if hasattr(edata, "messages"):
                     last_full_response[agent_id] = edata
+                # Mid-stream: if any FunctionCall content lands, fire a
+                # tool_call_started event so the UI can show a spinner
+                # before the tool result lands.
+                for fc in _extract_function_calls(edata):
+                    cid = fc["call_id"]
+                    if not cid or cid in announced_calls:
+                        continue
+                    announced_calls.add(cid)
+                    await store.publish(
+                        session.session_id,
+                        event(
+                            "tool_call_started",
+                            {
+                                "turn": turn,
+                                "agent": agent_id,
+                                "tool": fc["tool"],
+                                "call_id": cid,
+                                "args": fc["args"],
+                            },
+                        ),
+                    )
 
             elif etype == "executor_completed" and eid in FOUNDRY_NAME_TO_AGENT:
                 agent_id = FOUNDRY_NAME_TO_AGENT[eid]
+                await _clear_thinking(agent_id)
                 full = last_full_response.pop(agent_id, None)
                 if full is not None:
                     ctx_for_agent = _RuntimeCtx(

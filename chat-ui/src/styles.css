@@ -130,6 +130,13 @@ code, pre, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, m
   font-size: 12px; max-width: 80ch; overflow: hidden;
 }
 .tool-card-fail { border-color: var(--danger); }
+.tool-card-pending { border-color: var(--accent); }
+.tool-spinner {
+  width: 12px; height: 12px; border-radius: 50%;
+  border: 2px solid var(--border); border-top-color: var(--accent);
+  display: inline-block; animation: tool-spin 0.8s linear infinite;
+}
+@keyframes tool-spin { to { transform: rotate(360deg); } }
 .tool-card-header {
   display: flex; align-items: center; gap: 8px; width: 100%;
   background: transparent; border: 0; color: var(--text);

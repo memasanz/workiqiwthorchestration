@@ -109,11 +109,14 @@ export function reducer(state: SessionState, action: Action): SessionState {
           };
         case "agent_turn_start":
           return state; // soft event; bubbles created on agent_message
-        case "agent_message":
+        case "agent_message": {
+          const cleaned = state.transcript.filter(
+            (t) => t.kind !== "tool_pending",
+          );
           return {
             ...state,
             transcript: [
-              ...state.transcript,
+              ...cleaned,
               {
                 id: eid(),
                 kind: "agent_message",
@@ -123,6 +126,7 @@ export function reducer(state: SessionState, action: Action): SessionState {
               },
             ],
           };
+        }
         case "tool_proposed":
           return {
             ...state,
@@ -152,11 +156,54 @@ export function reducer(state: SessionState, action: Action): SessionState {
               },
             ],
           };
-        case "tool_executed":
+        case "tool_call_started":
           return {
             ...state,
             transcript: [
               ...state.transcript,
+              {
+                id: eid(),
+                kind: "tool_pending",
+                turn: ev.data.turn,
+                agent: ev.data.agent,
+                payload: ev.data,
+              },
+            ],
+          };
+        case "agent_thinking": {
+          const sentinel = `__thinking__:${ev.data.agent}`;
+          const without = state.transcript.filter(
+            (t) => !(t.kind === "tool_pending" && t.payload?.call_id === sentinel),
+          );
+          if (!ev.data.active) {
+            return { ...state, transcript: without };
+          }
+          return {
+            ...state,
+            transcript: [
+              ...without,
+              {
+                id: eid(),
+                kind: "tool_pending",
+                turn: ev.data.turn,
+                agent: ev.data.agent,
+                payload: { call_id: sentinel, tool: "thinking", thinking: true },
+              },
+            ],
+          };
+        }
+        case "tool_executed": {
+          const cid = (ev.data as any).call_id;
+          const filtered = state.transcript.filter((t) => {
+            if (t.kind !== "tool_pending") return true;
+            if (t.payload?.thinking) return false;
+            if (cid && t.payload?.call_id === cid) return false;
+            return true;
+          });
+          return {
+            ...state,
+            transcript: [
+              ...filtered,
               {
                 id: eid(),
                 kind: "tool_executed",
@@ -166,6 +213,7 @@ export function reducer(state: SessionState, action: Action): SessionState {
               },
             ],
           };
+        }
         case "tool_rejected":
           return {
             ...state,
@@ -193,7 +241,11 @@ export function reducer(state: SessionState, action: Action): SessionState {
             },
           };
         case "final":
-          return { ...state, turnInFlight: false };
+          return {
+            ...state,
+            turnInFlight: false,
+            transcript: state.transcript.filter((t) => t.kind !== "tool_pending"),
+          };
         case "error":
           return {
             ...state,

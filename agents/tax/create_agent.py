@@ -29,6 +29,13 @@ WORKIQ_MCP_SERVER_URL = "https://agent365.svc.cloud.microsoft/agents/servers/mcp
 WORKIQ_MCP_SERVER_LABEL = "WorkIQUser"
 WORKIQ_MCP_CONNECTION_ID = "WorkIQUser"
 
+# WorkIQ "Mail" MCP server (Microsoft Agent 365). Same identity model as
+# WorkIQUser — Foundry connection handles per-user OBO. Lets agents search
+# the SME's mailbox for relevant prior context before drafting.
+WORKIQ_MAIL_MCP_SERVER_URL = "https://agent365.svc.cloud.microsoft/agents/servers/mcp_MailTools"
+WORKIQ_MAIL_MCP_SERVER_LABEL = "WorkIQMail"
+WORKIQ_MAIL_MCP_CONNECTION_ID = "WorkIQMail"
+
 
 def load_instructions() -> str:
     return (Path(__file__).parent / "system_prompt.md").read_text(encoding="utf-8")
@@ -57,10 +64,17 @@ def main() -> int:
         project_connection_id=WORKIQ_MCP_CONNECTION_ID,
     )
 
+    workiq_mail_mcp_tool = MCPTool(
+        server_label=WORKIQ_MAIL_MCP_SERVER_LABEL,
+        server_url=WORKIQ_MAIL_MCP_SERVER_URL,
+        require_approval="never",
+        project_connection_id=WORKIQ_MAIL_MCP_CONNECTION_ID,
+    )
+
     definition = PromptAgentDefinition(
         model=MODEL_DEPLOYMENT_NAME,
         instructions=instructions,
-        tools=[mcp_tool, workiq_mcp_tool],
+        tools=[mcp_tool, workiq_mcp_tool, workiq_mail_mcp_tool],
     )
 
     agent = client.agents.create_version(
