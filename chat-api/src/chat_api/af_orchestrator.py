@@ -41,7 +41,15 @@ from typing import Any, Awaitable
 
 from azure.identity.aio import DefaultAzureCredential
 
-from agent_framework import AgentSession
+from agent_framework import (
+    AgentExecutor,
+    AgentSession,
+    Executor,
+    WorkflowBuilder,
+    WorkflowContext,
+    WorkflowEvent,
+    handler,
+)
 from agent_framework.foundry import FoundryAgent
 
 from .config import (
@@ -70,6 +78,10 @@ HANDOFF_TARGETS: dict[str, tuple[str, ...]] = {
 
 VALID_AGENTS = ("submissions", "tax", "legal")
 MAX_AGENT_RUNS_PER_TURN = 6
+
+# Reverse map: foundry agent name -> internal agent_id. Built lazily so a
+# missing AGENT_TO_FOUNDRY_NAME entry surfaces at import time.
+FOUNDRY_NAME_TO_AGENT: dict[str, str] = {v: k for k, v in AGENT_TO_FOUNDRY_NAME.items()}
 
 
 # --------------------------------------------------------------------------- #
@@ -261,6 +273,46 @@ def _classify_user_message(text: str) -> str | None:
     return None
 
 
+class RouterExecutor(Executor):
+    """First-hop in the workflow graph. Reads the raw user message,
+    runs ``_classify_user_message`` (cheap keyword-based router),
+    falls back to ``initial_agent`` if no keyword matches, then
+    forwards the same string to exactly one downstream
+    ``AgentExecutor`` via ``ctx.send_message(target_id=...)``.
+
+    No LLM hop. No hidden state (the chosen agent name is reported
+    via the ``decision_box`` so the caller can emit SSE).
+    """
+
+    def __init__(self, *, initial_agent: str, decision_box: list[str]) -> None:
+        super().__init__(id="router")
+        self._initial = initial_agent
+        # decision_box: shared single-element list so the caller can read
+        # back which agent the router picked (mutated synchronously inside
+        # the handler, before the workflow returns).
+        self._decision_box = decision_box
+
+    @handler
+    async def route(self, text: str, ctx: WorkflowContext[str]) -> None:
+        keyword = _classify_user_message(text)
+        target_agent = self._initial
+        if keyword and keyword != self._initial:
+            # Don't switch AWAY from submissions just because the user's
+            # message contains tax/legal keywords — submissions IS the
+            # intake orchestrator and is expected to receive lists of
+            # mixed-topic questions, classify them, and create the
+            # project. Keyword routing only overrides when (a) we're not
+            # currently on submissions, or (b) the user is explicitly
+            # asking to start a new project (keyword == "submissions").
+            if self._initial != "submissions" or keyword == "submissions":
+                target_agent = keyword
+        if target_agent not in AGENT_TO_FOUNDRY_NAME:
+            target_agent = self._initial
+        self._decision_box.append(target_agent)
+        target_id = AGENT_TO_FOUNDRY_NAME[target_agent]
+        await ctx.send_message(text, target_id=target_id)
+
+
 def _apply_handoff_preface(agent_id: str, run_input: Any) -> Any:
     preface = _handoff_preface(agent_id)
     if not preface:
@@ -420,81 +472,163 @@ async def run_turn(
     *,
     initial_input: Any = None,
 ) -> str:
-    """Drive one user turn through the active agent via the responses
-    passthrough. Per agent we maintain a single service-managed session
-    id (``service_session_id``) in ``fs.threads`` so the SME keeps its
-    full history across turns.
+    """Drive one user turn through an Agent Framework ``WorkflowBuilder``
+    graph: ``RouterExecutor`` → one of three ``AgentExecutor``s wrapping
+    ``submissions`` / ``tax`` / ``legal`` ``FoundryAgent``s.
 
-    Returns the final active agent at end-of-turn.
+    Per-agent service-managed session ids (Foundry's
+    ``previous_response_id`` chain) are loaded from ``fs.threads`` into
+    each ``AgentSession`` before the run, then written back after.
+    Returns the agent that handled this turn (so the caller can update
+    ``Session.active_agent``).
     """
     session.turn_counter += 1
     turn = session.turn_counter
 
-    current = active_agent
-    runs = 0
-    next_input: Any = initial_input
+    user_text = initial_input if isinstance(initial_input, str) else ""
 
-    keyword_target = _classify_user_message(initial_input if isinstance(initial_input, str) else "")
-    if keyword_target and keyword_target != current:
-        log.info("pre-router: switching from %s to %s based on user message", current, keyword_target)
-        current = keyword_target
-        await emit_router_decision(store, session.session_id, current)
-
-    while runs < MAX_AGENT_RUNS_PER_TURN:
-        runs += 1
-        ctx = _RuntimeCtx(
-            session=session,
-            cfg=cfg,
-            store=store,
-            turn=turn,
-            agent_id=current,
-            user_token=fs.user_token,
+    # Build per-request workflow with fresh OBO-bound FoundryAgents.
+    agent_executors: dict[str, AgentExecutor] = {}
+    sessions_by_agent: dict[str, AgentSession] = {}
+    for agent_id in VALID_AGENTS:
+        foundry_name = AGENT_TO_FOUNDRY_NAME[agent_id]
+        fa = get_or_create_agent(fs, cfg, agent_id)
+        prior_sid = fs.threads.get(foundry_name)
+        ag_sess = AgentSession(service_session_id=prior_sid)
+        sessions_by_agent[agent_id] = ag_sess
+        agent_executors[agent_id] = AgentExecutor(
+            fa, session=ag_sess, id=foundry_name,
         )
 
-        agent = get_or_create_agent(fs, cfg, current)
-        foundry_name = AGENT_TO_FOUNDRY_NAME[current]
+    decision_box: list[str] = []
+    router = RouterExecutor(initial_agent=active_agent, decision_box=decision_box)
 
-        if current not in fs.announced_participants:
-            fs.announced_participants.add(current)
-            version = await get_resolved_version(cfg, current)
-            await store.publish(
-                session.session_id,
-                event(
-                    "participant",
-                    {
-                        "agent_id": current,
-                        "foundry_name": foundry_name,
-                        "version": version,
-                    },
-                ),
-            )
+    builder = WorkflowBuilder(start_executor=router)
+    for ae in agent_executors.values():
+        builder.add_edge(router, ae)
+    workflow = builder.build()
 
+    announced_this_turn: set[str] = set()
+
+    async def _emit_participant_if_new(agent_id: str) -> None:
+        if agent_id in fs.announced_participants:
+            return
+        fs.announced_participants.add(agent_id)
+        version = await get_resolved_version(cfg, agent_id)
         await store.publish(
             session.session_id,
-            event("agent_turn_start", {"turn": turn, "agent": current}),
+            event(
+                "participant",
+                {
+                    "agent_id": agent_id,
+                    "foundry_name": AGENT_TO_FOUNDRY_NAME[agent_id],
+                    "version": version,
+                },
+            ),
         )
 
-        run_input = _apply_handoff_preface(current, next_input)
+    final_agent = active_agent
 
-        # Reuse this agent's prior service session id (Foundry's
-        # previous_response_id chain) so the SME keeps full history
-        # across turns within this chat session.
-        prior_sid = fs.threads.get(foundry_name)
-        agent_session = AgentSession(service_session_id=prior_sid)
+    # Per-agent text buffers — fed by streaming AgentResponseUpdate chunks,
+    # flushed on executor_completed as a single agent_message (preserves
+    # today's UI contract while enabling token-level events for future use).
+    text_buffers: dict[str, list[str]] = {}
+    last_full_response: dict[str, Any] = {}
 
-        try:
-            response = await agent.run(
-                run_input, session=agent_session,
-            )
-        except Exception as e:  # noqa: BLE001
-            log.exception("agent %s run failed", current)
-            await store.publish(
-                session.session_id,
-                event("error", {"message": f"agent {current}: {e}"}),
-            )
-            break
+    async def _flush_agent(agent_id: str) -> None:
+        text = "".join(text_buffers.get(agent_id, [])).strip()
+        if not text:
+            return
+        text_buffers[agent_id] = []
+        await store.publish(
+            session.session_id,
+            event(
+                "agent_message",
+                {"turn": turn, "agent": agent_id, "text": text},
+            ),
+        )
+        session.transcript.append(
+            TranscriptMessage(role="assistant", agent=agent_id, text=text)
+        )
 
-        new_sid = _extract_service_session_id(response, agent_session)
+    try:
+        async for ev in workflow.run(user_text, stream=True):
+            etype = getattr(ev, "type", None)
+            eid = getattr(ev, "executor_id", None)
+            edata = getattr(ev, "data", None)
+
+            if etype == "executor_invoked" and eid in FOUNDRY_NAME_TO_AGENT:
+                agent_id = FOUNDRY_NAME_TO_AGENT[eid]
+                if agent_id != active_agent and agent_id not in announced_this_turn:
+                    await emit_router_decision(store, session.session_id, agent_id)
+                announced_this_turn.add(agent_id)
+                final_agent = agent_id
+                text_buffers[agent_id] = []
+                await _emit_participant_if_new(agent_id)
+                await store.publish(
+                    session.session_id,
+                    event("agent_turn_start", {"turn": turn, "agent": agent_id}),
+                )
+
+            elif etype == "output" and eid in FOUNDRY_NAME_TO_AGENT and edata is not None:
+                agent_id = FOUNDRY_NAME_TO_AGENT[eid]
+                # AgentExecutor in streaming mode yields AgentResponseUpdate
+                # per token; in non-streaming it yields a full AgentResponse.
+                # Both expose .text (and a value attr / messages on Response).
+                chunk = _extract_text(edata)
+                if chunk:
+                    text_buffers.setdefault(agent_id, []).append(chunk)
+                    await store.publish(
+                        session.session_id,
+                        event(
+                            "assistant_token",
+                            {"turn": turn, "agent": agent_id, "delta": chunk},
+                        ),
+                    )
+                # Hold on to the most recent full response (if any) so we
+                # can surface tool calls once the agent finishes.
+                if hasattr(edata, "messages"):
+                    last_full_response[agent_id] = edata
+
+            elif etype == "executor_completed" and eid in FOUNDRY_NAME_TO_AGENT:
+                agent_id = FOUNDRY_NAME_TO_AGENT[eid]
+                full = last_full_response.pop(agent_id, None)
+                if full is not None:
+                    ctx_for_agent = _RuntimeCtx(
+                        session=session,
+                        cfg=cfg,
+                        store=store,
+                        turn=turn,
+                        agent_id=agent_id,
+                        user_token=fs.user_token,
+                    )
+                    await _surface_function_results(ctx_for_agent, full)
+                await _flush_agent(agent_id)
+
+            elif etype == "executor_failed" and eid in FOUNDRY_NAME_TO_AGENT:
+                agent_id = FOUNDRY_NAME_TO_AGENT[eid]
+                err = getattr(ev, "details", None) or edata
+                log.error("agent %s executor failed: %s", agent_id, err)
+                await store.publish(
+                    session.session_id,
+                    event("error", {"message": f"agent {agent_id}: {err}"}),
+                )
+    except Exception as e:  # noqa: BLE001
+        log.exception("workflow run failed")
+        await store.publish(
+            session.session_id,
+            event("error", {"message": f"workflow: {e}"}),
+        )
+
+    # Safety net: flush anything still buffered (e.g. if no executor_completed
+    # fired for some agent that produced output).
+    for agent_id in list(text_buffers.keys()):
+        await _flush_agent(agent_id)
+
+    # Persist updated service_session_ids for thread continuity next turn.
+    for agent_id, ag_sess in sessions_by_agent.items():
+        foundry_name = AGENT_TO_FOUNDRY_NAME[agent_id]
+        new_sid = getattr(ag_sess, "service_session_id", None)
         if new_sid and fs.threads.get(foundry_name) != new_sid:
             fs.threads[foundry_name] = new_sid
             log.info(
@@ -502,38 +636,11 @@ async def run_turn(
                 session.session_id, foundry_name, new_sid,
             )
 
-        await _surface_function_results(ctx, response)
-
-        text = _extract_text(response).strip()
-        handoff = _parse_handoff_sentinel(text)
-        if handoff and handoff in HANDOFF_TARGETS.get(current, ()):
-            ctx.next_agent = handoff
-            text = _strip_handoff_sentinel(text)
-
-        if text:
-            await store.publish(
-                session.session_id,
-                event(
-                    "agent_message",
-                    {"turn": turn, "agent": current, "text": text},
-                ),
-            )
-            session.transcript.append(
-                TranscriptMessage(role="assistant", agent=current, text=text)
-            )
-
-        if ctx.next_agent and ctx.next_agent != current:
-            current = ctx.next_agent
-            await emit_router_decision(store, session.session_id, current)
-            next_input = ""
-            continue
-        break
-
     await store.publish(
         session.session_id,
         event("final", {"turn": turn, "session_id": session.session_id}),
     )
-    return current
+    return final_agent
 
 
 # Legacy stubs preserved for import compatibility; not used under

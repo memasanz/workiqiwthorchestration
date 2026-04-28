@@ -24,5 +24,5 @@ async def health(request: Request) -> dict[str, object]:
         },
         "devBypassAuth": cfg.dev_bypass_auth,
         "jwtAuthEnabled": cfg.token_validator is not None,
-        "version": "0.7.5",
+        "version": "0.8.4",
     }
