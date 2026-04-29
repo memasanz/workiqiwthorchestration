@@ -3,11 +3,19 @@
 Reads cosmos endpoint + DB from azd env values; uses DefaultAzureCredential.
 Idempotent — re-run safely after changing user lists.
 
-Usage:
-    python scripts/admin/seed_routing.py
+Usage (preferred — no preinstall needed, just `uv`):
+    uv run scripts/admin/seed_routing.py
 or:
-    pwsh ./scripts/admin/seed_routing.ps1
+    python scripts/admin/seed_routing.py    # requires the deps below
 """
+# /// script
+# requires-python = ">=3.11"
+# dependencies = [
+#   "azure-cosmos>=4.7",
+#   "azure-identity>=1.17",
+#   "aiohttp>=3.9",
+# ]
+# ///
 from __future__ import annotations
 
 import asyncio

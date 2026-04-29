@@ -53,10 +53,20 @@ Write-Host "══════════════════════�
 
 Write-Step "Seeding Cosmos routing queues (tax + legal)"
 $seedScript = Join-Path $PSScriptRoot '..\admin\seed_routing.py'
+$uv = Get-Command uv -ErrorAction SilentlyContinue
 try {
-    python $seedScript
+    if ($uv) {
+        # uv reads PEP 723 inline metadata at the top of the script and
+        # provisions a throwaway venv with azure-cosmos + azure-identity.
+        & uv run $seedScript
+        if ($LASTEXITCODE -ne 0) { throw "uv run exited $LASTEXITCODE" }
+    } else {
+        Write-Warning "uv not found — falling back to system python (must have azure-cosmos + azure-identity installed)."
+        & python $seedScript
+        if ($LASTEXITCODE -ne 0) { throw "python exited $LASTEXITCODE" }
+    }
     Write-Ok "routing seeded"
 } catch {
     Write-Warning "Seed step failed: $($_.Exception.Message)"
-    Write-Warning "Run 'python ./scripts/admin/seed_routing.py' manually after granting yourself Cosmos Data Contributor."
+    Write-Warning "Run 'uv run ./scripts/admin/seed_routing.py' (or install azure-cosmos+azure-identity and run with python) after granting yourself Cosmos Data Contributor."
 }
