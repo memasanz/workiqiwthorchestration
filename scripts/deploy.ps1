@@ -66,6 +66,29 @@ if (-not $existing) {
     azd env select $EnvName | Out-Null
 }
 
+# Seed AZURE_SUBSCRIPTION_ID + AZURE_LOCATION from .env BEFORE azd up,
+# because azd resolves those before running the preprovision hook.
+function Get-EnvValue([string]$Key) {
+    $line = Get-Content .env | Select-String "^\s*$Key\s*=" | Select-Object -First 1
+    if (-not $line) { return $null }
+    return ($line.ToString() -replace "^\s*$Key\s*=", '' -replace '^"|"$', '' -replace "^'|'$", '').Trim()
+}
+
+$subFromEnv = Get-EnvValue 'AZURE_SUBSCRIPTION_ID'
+$locFromEnv = Get-EnvValue 'AZURE_LOCATION'
+if (-not $subFromEnv) {
+    $subFromEnv = az account show --query id -o tsv 2>$null
+    if ($subFromEnv) {
+        Write-Host "AZURE_SUBSCRIPTION_ID not in .env — using current az context: $subFromEnv" -ForegroundColor DarkYellow
+    } else {
+        throw "AZURE_SUBSCRIPTION_ID not set in .env and no active 'az login'. Run 'az login' or add it to .env."
+    }
+}
+if (-not $locFromEnv) { $locFromEnv = 'eastus2' ; Write-Host "AZURE_LOCATION not in .env — defaulting to $locFromEnv" -ForegroundColor DarkYellow }
+
+azd env set AZURE_SUBSCRIPTION_ID $subFromEnv | Out-Null
+azd env set AZURE_LOCATION        $locFromEnv | Out-Null
+
 Step 1 "Entra app registrations (first pass)"
 pwsh ./scripts/admin/setup-entra.ps1
 
