@@ -45,6 +45,9 @@ Two M365 portal prereqs (manual, admin-only) + **one command** for everything el
 
 ### 0. Tools
 
+Install once, then sign in to **both** CLIs (azd and az use separate
+token caches):
+
 ```pwsh
 winget install Microsoft.AzureCLI
 winget install Microsoft.Azd                  # Azure Developer CLI
@@ -52,9 +55,15 @@ winget install Microsoft.PowerShell           # PowerShell 7+
 winget install Astral-sh.uv                   # for local Python work
 winget install OpenJS.NodeJS.LTS              # for local chat-ui work
 
-az login
-azd auth login
+az login                                      # required for `az` calls in hooks
+azd auth login                                # required for `azd up` / env
 ```
+
+> Both logins are **mandatory** — the deploy wrapper uses `az` (for
+> `az ad`, `az containerapp`, `az cosmosdb`) **and** `azd` (for
+> provisioning + env management). Run them in the same terminal you'll
+> run `deploy.ps1` from. Re-run them if you see `AADSTS70043`
+> (token expired) or any `unauthorized` errors mid-deploy.
 
 ### 0.5. Required permissions
 
@@ -300,6 +309,36 @@ Required for client_credentials, OBO, and managed-identity flows.
   (auth type = `UserEntraToken`, scope = `McpServers.Me.All`). Foundry
   stores the scope and runs the second OBO automatically when invoking
   the MCP connection.
+
+### Glossary
+
+- **UAMI — User-Assigned Managed Identity.** A standalone Entra
+  identity you create as an Azure resource and attach to one or more
+  consumers (Container Apps, VMs, Functions). Unlike a system-assigned
+  MI, a UAMI's `principalId` is **stable across redeploys** of the
+  consumer — that's critical here because the backend app reg's
+  federated credential trust is bound to that exact `principalId`. We
+  create one UAMI for chat-api and one per MCP profile in
+  `infra/modules/identity.bicep`.
+
+- **FIC — Federated Identity Credential.** An Entra feature that lets
+  one identity (a UAMI here) prove it's allowed to act as another
+  identity (the backend app registration) **without a client secret**.
+  At request time the chat-api asks its UAMI for a token with audience
+  `api://AzureADTokenExchange`, then hands that token to Entra as the
+  `client_assertion` parameter in the OBO call. Entra trusts it because
+  the FIC on the backend app reg pre-approved tokens signed by exactly
+  that UAMI's `principalId`. Result: no client secret to rotate or
+  leak; the trust binding is to a specific identity in a specific
+  subscription, not a static value.
+
+- **OBO — On-Behalf-Of.** The OAuth 2.0 flow where a service exchanges
+  a user's access token for a new token (different audience, same user
+  identity). Used here to keep all downstream calls *as the user* —
+  Foundry / WorkIQ MCPs only ever see tokens for the actual signed-in
+  user, never for chat-api's own identity. `OnBehalfOfCredential` from
+  `azure.identity` does the exchange; the FIC supplies the
+  `client_assertion` instead of a `client_secret`.
 
 ### Why a Federated Identity Credential (FIC) instead of a client secret?
 
