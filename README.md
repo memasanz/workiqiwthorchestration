@@ -56,6 +56,30 @@ az login
 azd auth login
 ```
 
+### 0.5. Required permissions
+
+The deploy wrapper performs three categories of admin actions. The
+identity running `pwsh ./scripts/deploy.ps1` needs all of the following
+in the target tenant + subscription:
+
+| Action | Done by | Minimum role(s) needed |
+|--------|---------|-----------------------|
+| Create / update Entra app registrations + add federated credential | `setup-entra.ps1` | **Application Administrator** *or* **Cloud Application Administrator** (Entra) |
+| Grant tenant-wide admin consent on 4 delegated permissions (incl. admin-only `user_impersonation` + `McpServers.Me.All`) | `grant-consent.ps1` | **Privileged Role Administrator** *or* **Global Administrator** (Entra) |
+| Provision Azure resources (Cosmos, ACR, Container Apps, UAMI) + create RBAC role assignments | `azd up` (Bicep) | **Contributor** *and* **User Access Administrator** (or just **Owner**) on the resource group / subscription |
+| Cosmos DB data-plane role assignment for the deploying user | Bicep `adminCosmosRbac` (auto) | covered by the Owner / UAA role above |
+| Add WorkIQ catalog connections in Foundry | manual step 1 | **Foundry project Owner** in the Microsoft 365 / Foundry portal |
+
+In practice, a tenant **Global Administrator** with **Owner** on the
+target subscription has everything. If you split duties, you need both
+an Entra admin (for `setup-entra.ps1` + `grant-consent.ps1`) and an
+Azure admin (for `azd up`) to run the wrapper end-to-end.
+
+> **Tip:** if you don't have Application Administrator, you can ask
+> your tenant admin to pre-create the two app regs and skip step 3.1
+> in `deploy.ps1` (run only the second pass with the existing IDs in
+> `.env`).
+
 ### 1. Admin: Foundry portal prereqs (one-time, manual)
 
 `azd` cannot provision the Foundry project or WorkIQ catalog
