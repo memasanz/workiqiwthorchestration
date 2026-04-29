@@ -226,7 +226,7 @@ sequenceDiagram
     participant MI as User-Assigned<br/>Managed Identity
     participant Entra as Entra ID
     participant AzSDK as azure.core<br/>BearerTokenPolicy
-    participant Foundry as Foundry<br/>(Hosted V2 agent)
+    participant Foundry as Foundry<br/>(PromptAgent)
     participant MCP as WorkIQ MCP
 
     Note over User,UI: 1️⃣ Sign-in (MSAL.js)
