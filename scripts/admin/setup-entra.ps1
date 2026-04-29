@@ -298,16 +298,58 @@ $out = [ordered]@{
 $out | ConvertTo-Json -Depth 10 | Set-Content -Path $OutputPath -Encoding utf8
 Write-Ok "Output: $OutputPath"
 
+# ── Persist IDs back to .env so the next step (azd up) picks them up ────────
+function Set-EnvVar([string]$Path, [string]$Key, [string]$Value) {
+    if (-not (Test-Path $Path)) {
+        Set-Content -Path $Path -Value "$Key=$Value" -Encoding utf8
+        return "added"
+    }
+    $lines = Get-Content $Path
+    $found = $false
+    $changed = $false
+    $newLines = foreach ($line in $lines) {
+        if ($line -match "^\s*$([regex]::Escape($Key))\s*=") {
+            $found = $true
+            $newLine = "$Key=$Value"
+            if ($line -ne $newLine) { $changed = $true }
+            $newLine
+        } else {
+            $line
+        }
+    }
+    if (-not $found) {
+        $newLines = @($newLines) + "$Key=$Value"
+        Set-Content -Path $Path -Value $newLines -Encoding utf8
+        return "added"
+    }
+    if ($changed) {
+        Set-Content -Path $Path -Value $newLines -Encoding utf8
+        return "updated"
+    }
+    return "unchanged"
+}
+
+Write-Step "Persisting Entra IDs to $EnvFile"
+$pairs = [ordered]@{
+    ENTRA_TENANT_ID      = $tenantId
+    ENTRA_BACKEND_APP_ID = $backendAppId
+    ENTRA_SPA_APP_ID     = $spaAppId
+}
+foreach ($k in $pairs.Keys) {
+    $action = Set-EnvVar -Path $EnvFile -Key $k -Value $pairs[$k]
+    Write-Ok "$k ($action)"
+}
+
 Write-Host ""
 Write-Host "════════════════════════════════════════════════════════════════════" -ForegroundColor Cyan
 Write-Host " ✓ App regs ready. Permissions set but NOT consented."                -ForegroundColor Cyan
 Write-Host ""
-Write-Host " IDs to put in your .env:"                                            -ForegroundColor Cyan
+Write-Host " Entra IDs written to .env:"                                          -ForegroundColor Cyan
 Write-Host "   ENTRA_TENANT_ID      = $tenantId"
 Write-Host "   ENTRA_BACKEND_APP_ID = $backendAppId"
 Write-Host "   ENTRA_SPA_APP_ID     = $spaAppId"
 Write-Host ""
-Write-Host " Then run: azd up"                                                    -ForegroundColor Cyan
+Write-Host " Next: azd up"                                                        -ForegroundColor Cyan
 Write-Host " Then re-run this script with -UamiPrincipalId + -ChatUiFqdn."        -ForegroundColor Cyan
 Write-Host " Finally, an admin runs: ./scripts/admin/grant-consent.ps1"           -ForegroundColor Cyan
 Write-Host "════════════════════════════════════════════════════════════════════" -ForegroundColor Cyan
