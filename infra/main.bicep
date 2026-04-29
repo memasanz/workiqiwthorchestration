@@ -58,6 +58,9 @@ param entraBackendAppId string
 @description('Entra app ID for the SPA (mpwflow-spa). Plumbed into the chat-ui build via Vite env vars.')
 param entraSpaAppId string
 
+@description('Optional: principal (object) ID of the deploying admin. When set, gets Cosmos DB Built-in Data Contributor on the workflow account so they can seed routing docs without a manual role assignment. Empty = skip.')
+param adminPrincipalId string = ''
+
 var envSuffix = startsWith(toLower(environmentName), toLower('${baseName}-')) ? substring(environmentName, length(baseName) + 1) : environmentName
 var nameSuffix = toLower('${baseName}-${envSuffix}')
 var nameSuffixCompact = toLower(replace('${baseName}${envSuffix}', '-', ''))
@@ -134,6 +137,15 @@ module profileCosmosRbac 'modules/cosmos-role-assignment.bicep' = [for (p, i) in
     principalLabel: 'mcp-${p.appSuffix}'
   }
 }]
+
+module adminCosmosRbac 'modules/cosmos-role-assignment.bicep' = if (!empty(adminPrincipalId)) {
+  name: 'cosmos-rbac-admin'
+  params: {
+    cosmosAccountName: cosmos.outputs.accountName
+    principalId: adminPrincipalId
+    principalLabel: 'admin-deployer'
+  }
+}
 
 module profileAcrRbac 'modules/acr-role-assignment.bicep' = [for (p, i) in profiles: {
   name: 'acr-rbac-${p.key}'

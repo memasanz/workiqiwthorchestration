@@ -50,3 +50,13 @@ Write-Host ""
 Write-Host "════════════════════════════════════════════════════════════════════" -ForegroundColor Cyan
 Write-Host " ✓ mcp-server image fanned out to tax + legal apps."                 -ForegroundColor Cyan
 Write-Host "════════════════════════════════════════════════════════════════════" -ForegroundColor Cyan
+
+Write-Step "Seeding Cosmos routing queues (tax + legal)"
+$seedScript = Join-Path $PSScriptRoot '..\admin\seed_routing.py'
+try {
+    python $seedScript
+    Write-Ok "routing seeded"
+} catch {
+    Write-Warning "Seed step failed: $($_.Exception.Message)"
+    Write-Warning "Run 'python ./scripts/admin/seed_routing.py' manually after granting yourself Cosmos Data Contributor."
+}

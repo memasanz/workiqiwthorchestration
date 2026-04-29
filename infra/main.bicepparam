@@ -16,3 +16,5 @@ param entraBackendAppId = readEnvironmentVariable('ENTRA_BACKEND_APP_ID')
 param entraSpaAppId = readEnvironmentVariable('ENTRA_SPA_APP_ID')
 
 param chatApiDevBypassAuth = readEnvironmentVariable('CHAT_API_DEV_BYPASS_AUTH', 'false')
+
+param adminPrincipalId = readEnvironmentVariable('ADMIN_PRINCIPAL_ID', '')

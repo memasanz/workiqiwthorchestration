@@ -30,16 +30,18 @@ Azure AI Foundry  ← runs registered agents as the signed-in user
 | `mcp-server/` | FastMCP server exposing workflow tools (3 deployed instances, one per profile) |
 | `infra/` | Bicep templates + `main.bicepparam` (azd-driven) |
 | `azure.yaml` | azd top-level service + hook configuration |
-| `scripts/admin/` | One-time admin scripts (Entra app regs, tenant consent, Cosmos seed) |
+| `scripts/deploy.ps1` | One-shot end-to-end wrapper (use this for fresh deploys) |
+| `scripts/admin/` | Admin scripts (Entra app regs, tenant consent, Cosmos seed) |
+| `scripts/pre-provision/` | azd `preprovision` hook — auto-loads `.env` into azd env + captures admin principalId for Cosmos RBAC |
 | `scripts/pre-deploy/` | azd `predeploy` hook — writes `chat-ui/.env.production` so Vite inlines real MSAL IDs at build |
 | `scripts/post-provision/` | azd `postprovision` hook — registers Foundry agents |
-| `scripts/post-deploy/` | azd `postdeploy` hook — fans the MCP image out to tax + legal apps |
+| `scripts/post-deploy/` | azd `postdeploy` hook — fans MCP image to tax + legal apps and seeds routing |
 | `.env.sample` | Copy → `.env`, fill in, then `azd up` |
 | `PLAN.md` / `PLAN.html` | Living iteration plan |
 
-## Deploy from zero (`azd up`)
+## Deploy from zero
 
-Five steps. Steps 1 and 4 are admin-only; steps 2-3-5 are developer flow.
+Two M365 portal prereqs (manual, admin-only) + **one command** for everything else.
 
 ### 0. Tools
 
@@ -54,12 +56,12 @@ az login
 azd auth login
 ```
 
-### 1. Admin: prerequisites in the Foundry portal (manual, one-time)
+### 1. Admin: Foundry portal prereqs (one-time, manual)
 
-`azd up` does **not** provision Foundry — the WorkIQ catalog MCP
-connections are M365 portal actions that can't be automated.
+`azd` cannot provision the Foundry project or WorkIQ catalog
+connections — these are M365 portal actions.
 
-In the target Microsoft 365 tenant:
+In the target tenant:
 
 1. Create / pick an **Azure AI Foundry** project.
 2. Deploy a chat model (e.g. `gpt-4o-mini`) and note the deployment name.
@@ -71,115 +73,70 @@ In the target Microsoft 365 tenant:
    The names **must** match exactly — `agents/{tax,legal}/create_agent.py`
    look them up by name.
 
-### 2. Admin: create the two Entra app registrations (first pass)
-
-```pwsh
-pwsh ./scripts/admin/setup-entra.ps1
-```
-
-Outputs `tenantId`, `<prefix>-api appId`, `<prefix>-spa appId` (prefix
-defaults to `AZURE_BASE_NAME` from `.env`). Paste them into `.env` (next
-step). See [`scripts/admin/README.md`](./scripts/admin/README.md) for
-what it creates.
-
-> **Why it tells you to "re-run after `azd up`"** — the script wires up
-> a [Federated Identity Credential](https://learn.microsoft.com/entra/workload-id/workload-identity-federation)
-> on the backend app reg that points at the chat-api UAMI's
-> `principalId`. That UAMI doesn't exist until `azd up` provisions it
-> in step 4 below — so the first pass *creates the app regs only*, and
-> a second pass (step 5) *adds the FIC + prod redirect URIs*. The
-> script is idempotent — both runs only add what's missing.
-
-### 3. Developer: configure `.env` and run `azd up`
+### 2. Developer: configure `.env`
 
 ```pwsh
 cp .env.sample .env
 # Fill in:
 #   AZURE_SUBSCRIPTION_ID
+#   AZURE_BASE_NAME            (3-12 chars, lowercase alphanumeric)
+#   AZURE_ENV_NAME             (e.g. <base>-dev)
+#   AZURE_LOCATION             (e.g. eastus2)
 #   FOUNDRY_PROJECT_ENDPOINT
 #   FOUNDRY_MODEL_DEPLOYMENT_NAME
-#   ENTRA_TENANT_ID, ENTRA_BACKEND_APP_ID, ENTRA_SPA_APP_ID  (from step 2)
-
-azd env new mpwflow-dev          # one-time per environment
-Get-Content .env | ForEach-Object {
-    if ($_ -match '^\s*([A-Z0-9_]+)=(.*)$') { azd env set $matches[1] $matches[2] }
-}
-
-azd up
+# (ENTRA_TENANT_ID / ENTRA_BACKEND_APP_ID / ENTRA_SPA_APP_ID are
+#  filled in automatically by step 3 — leave blank on first run.)
 ```
 
-`azd up` will:
-1. Provision Bicep (`infra/main.bicep` via `infra/main.bicepparam`):
-   Cosmos + 3 containers, ACR, Container Apps env, Log Analytics +
-   App Insights, the chat-api UAMI (with FIC seat reserved on the
-   backend app reg), and 5 Container Apps (chat-api, chat-ui, 3× MCP).
-2. Build + push the chat-api / chat-ui / mcp-server images to ACR
-   via `az acr build` (no local Docker needed). The **predeploy** hook
-   (`scripts/pre-deploy/write_chat_ui_env.ps1`) runs first and writes
-   `chat-ui/.env.production` from the azd env's `ENTRA_*` values so
-   Vite inlines the real MSAL `tenantId` / `clientId` into the JS bundle
-   at build time (otherwise sign-in fails with `AADSTS900144`).
-3. Run the **postprovision** hook
-   (`scripts/post-provision/register_agents.ps1`) which registers /
-   updates the 3 Foundry PromptAgents (submissions, tax, legal) using
-   the MCP FQDNs that azd just created.
-4. Run the **postdeploy** hook
-   (`scripts/post-deploy/fanout_mcp_image.ps1`) which copies the freshly
-   built mcp-server image from the submissions container app onto the
-   tax + legal container apps (single image, three apps, different
-   `AGENT_PROFILE` env var per app).
-
-### 4. Admin: finalise auth (FIC + redirect URIs + consent)
-
-After `azd up` finishes, the chat-api UAMI exists. Re-run the Entra
-script — this time it adds the federated credential binding the
-backend app reg to that UAMI, plus the production redirect URI on the
-SPA. Then a tenant admin grants consent:
+### 3. One-shot deploy
 
 ```pwsh
-$values = azd env get-values --output json | ConvertFrom-Json
-pwsh ./scripts/admin/setup-entra.ps1 `
-    -UamiPrincipalId $values.chatApiUamiPrincipalId `
-    -ChatUiFqdn      $values.chatUiAppFqdn
-# (-Prefix + -EnvSuffix auto-load from .env)
-
-pwsh ./scripts/admin/grant-consent.ps1
+pwsh ./scripts/deploy.ps1
 ```
 
-### 5. Admin: seed Cosmos routing queues + grant data-plane RBAC
+This wrapper does everything, idempotently:
 
-The `routing` container needs at least a `tax` and `legal` document
-(round-robin queues of SME user emails) before the orchestrator can
-assign work. Edit `scripts/admin/seed_routing.py` to use real users in
-your tenant, then run it. You also need Cosmos data-plane RBAC on your
-own user (Bicep only grants it to the chat-api UAMI, not to admins).
+1. **Entra app regs (first pass)** — `setup-entra.ps1` creates the
+   `<base>-api` and `<base>-spa` registrations and writes their IDs back
+   into `.env`.
+2. **`azd up`** — provisions Bicep + builds + deploys + runs four hooks:
+   - **preprovision** (`scripts/pre-provision/load_env_and_admin.ps1`):
+     loads `.env` into the azd env and captures your user objectId so
+     bicep can grant *you* Cosmos data-plane RBAC for seed scripts.
+   - **predeploy** (`scripts/pre-deploy/write_chat_ui_env.ps1`): writes
+     `chat-ui/.env.production` so Vite inlines real MSAL `tenantId` /
+     `clientId` into the JS bundle (otherwise sign-in fails with
+     `AADSTS900144`).
+   - **postprovision** (`scripts/post-provision/register_agents.ps1`):
+     registers / updates the 3 Foundry PromptAgents with the MCP FQDNs
+     just created.
+   - **postdeploy** (`scripts/post-deploy/fanout_mcp_image.ps1`):
+     copies the freshly built mcp-server image to the tax + legal
+     Container Apps and seeds Cosmos `routing/tax` + `routing/legal`
+     queues (via `seed_routing.py`).
+3. **Entra app regs (second pass)** — adds the federated credential
+   binding the backend app reg to the chat-api UAMI (which now exists)
+   plus the production redirect URI on the SPA.
+4. **Tenant admin consent** — `grant-consent.ps1`.
+5. Opens the deployed chat-ui in your default browser.
 
-```pwsh
-$values = azd env get-values --output json | ConvertFrom-Json
-$me = az ad signed-in-user show --query id -o tsv
+> **Why the two passes of `setup-entra.ps1`?** The federated credential
+> on the backend app reg trusts the chat-api UAMI by `principalId` —
+> which doesn't exist until `azd up` provisions it. The first pass
+> creates app regs only; the second adds the FIC + prod redirect URIs.
+> Both passes are idempotent and only add what's missing.
 
-# One-time: grant yourself "Cosmos DB Built-in Data Contributor"
-az cosmosdb sql role assignment create `
-  --account-name $values.cosmosAccountName `
-  -g $values.AZURE_RESOURCE_GROUP `
-  --scope "/" `
-  --principal-id $me `
-  --role-definition-id "00000000-0000-0000-0000-000000000002"
+> **Edit SME assignees**: by default, `seed_routing.py` populates the
+> tax + legal queues with placeholder emails. Open
+> `scripts/admin/seed_routing.py` and edit the `ROUTING_DOCS` list to
+> use real users in your tenant before the first real test.
 
-# Seed routing/tax + routing/legal docs
-python ./scripts/admin/seed_routing.py
-```
+### 4. Smoke
 
-### 6. Smoke
-
-```pwsh
-$values = azd env get-values --output json | ConvertFrom-Json
-Start-Process "https://$($values.chatUiAppFqdn)"
-```
-
-Sign in with a tenant user. Send "Hi" — the submissions agent should
-greet you by name (via WorkIQ `GetMyDetails`). Tax / legal questions
-are routed to the matching SME agent and answered as you (OBO).
+The browser should be open. Sign in with a tenant user. Send "Hi" — the
+submissions agent should greet you by name (via WorkIQ `GetMyDetails`).
+Tax / legal questions are routed to the matching SME agent and answered
+as you (OBO).
 
 ## Re-deploy a single service
 
@@ -191,16 +148,22 @@ azd deploy chat-api      # or chat-ui, or mcp-server
 Container App. To re-run a hook only, run the script directly:
 
 ```pwsh
-pwsh ./scripts/pre-deploy/write_chat_ui_env.ps1     # refresh chat-ui MSAL config
-pwsh ./scripts/post-provision/register_agents.ps1   # re-register Foundry agents
-pwsh ./scripts/post-deploy/fanout_mcp_image.ps1     # re-fan-out mcp image
+pwsh ./scripts/pre-provision/load_env_and_admin.ps1   # refresh azd env from .env
+pwsh ./scripts/pre-deploy/write_chat_ui_env.ps1       # refresh chat-ui MSAL config
+pwsh ./scripts/post-provision/register_agents.ps1     # re-register Foundry agents
+pwsh ./scripts/post-deploy/fanout_mcp_image.ps1       # re-fan-out mcp image + reseed routing
+python ./scripts/admin/seed_routing.py                # reseed routing only
 ```
 
-> **Note for `azd deploy chat-ui`:** when targeting a single service,
-> some azd versions skip the global `predeploy` hook. Run
-> `pwsh ./scripts/pre-deploy/write_chat_ui_env.ps1` first if MSAL IDs
-> have changed (or just use `azd up` / `azd deploy`, which always fires
-> the hook). The script writes `chat-ui/.env.production` (git-ignored).
+> **Note for `azd deploy <single-service>`:** when targeting a single
+> service, some azd versions skip the global `predeploy` hook. If MSAL
+> IDs have changed, run `pwsh ./scripts/pre-deploy/write_chat_ui_env.ps1`
+> first (or just re-run `pwsh ./scripts/deploy.ps1` — it's idempotent).
+
+> **`BACKEND_BASE_URL` in `chat-ui/Dockerfile`** has a hard-coded default
+> URL that's only a placeholder — at runtime nginx reads the real value
+> from the Container App env var (set in `infra/modules/chat-ui.bicep`),
+> so the default is never actually used.
 
 ## Tear down
 
@@ -210,13 +173,16 @@ azd down --purge --force
 
 Note: this only removes resources `azd up` created. It does **not**
 delete the Foundry project, WorkIQ connections, or Entra app regs —
-those are admin-managed prerequisites.
+those are admin-managed prerequisites. Specifically, the federated
+identity credential and production redirect URI added by the second
+`setup-entra.ps1` pass will remain on the backend / SPA app regs and
+need to be cleaned up manually if you want a fully clean slate.
 
 ## Iteration plan
 
 See [`PLAN.md`](./PLAN.md) (or [`PLAN.html`](./PLAN.html) for a rendered
-view). Iteration 8 is the current work — collapsing deploy to a single
-`azd up` driven by `.env`.
+view). Iteration 8 collapsed deploy to a single command
+(`scripts/deploy.ps1`) driven by `.env`.
 
 ## End-user identity passthrough (OBO + FIC)
 
@@ -294,7 +260,7 @@ Required for client_credentials, OBO, and managed-identity flows.
 
 ### Where each scope is set
 
-- **Hop 1** — `chat-ui/src/auth.ts` `loginRequest.scopes`. The backend
+- **Hop 1** — `chat-ui/src/auth/msal.ts` `loginRequest.scopes`. The backend
   app reg exposes `Chat.ReadWrite` as a delegated scope.
 - **Hop 2** — `chat-api/src/chat_api/foundry_credential.py` — the
   assertion func calls
@@ -328,11 +294,11 @@ or leak.*
 
 | What | File / line |
 |------|-------------|
-| MSAL config | `chat-ui/src/auth.ts` |
+| MSAL config | `chat-ui/src/auth/msal.ts` |
 | JWT validation | `chat-api/src/chat_api/token_validator.py` |
 | Caller extraction | `chat-api/src/chat_api/auth.py` |
 | OBO credential factory | `chat-api/src/chat_api/foundry_credential.py` |
 | Per-request OBO build | `chat-api/src/chat_api/routes/sessions.py` (`_build_user_credential`) |
-| Hand-off to FoundryAgent | `chat-api/src/chat_api/af_orchestrator.py:210` (`credential=fs.credential`) |
+| Hand-off to FoundryAgent | `chat-api/src/chat_api/af_orchestrator.py` (`credential=fs.credential`) |
 | App reg + FIC setup | `scripts/admin/setup-entra.ps1`, `scripts/admin/grant-consent.ps1` |
 
