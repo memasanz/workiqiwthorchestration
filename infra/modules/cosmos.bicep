@@ -19,8 +19,8 @@ param location string
 @description('Tags.')
 param tags object = {}
 
-@description('Principal (object) ID of the managed identity that should get data-plane Contributor access.')
-param dataPlanePrincipalId string
+@description('Optional principal (object) ID that should get inline data-plane Contributor access. Empty string skips inline RBAC (per-profile UAMIs are granted via cosmos-role-assignment.bicep).')
+param dataPlanePrincipalId string = ''
 
 @description('Throughput mode. autoscale uses an autoscale max RU; serverless ignores RU.')
 @allowed([ 'serverless', 'autoscale' ])
@@ -113,7 +113,7 @@ resource sqlContainers 'Microsoft.DocumentDB/databaseAccounts/sqlDatabases/conta
 // Built-in data-plane role: Cosmos DB Built-in Data Contributor
 var dataContributorRoleDefinitionId = '${account.id}/sqlRoleDefinitions/00000000-0000-0000-0000-000000000002'
 
-resource roleAssignment 'Microsoft.DocumentDB/databaseAccounts/sqlRoleAssignments@2024-05-15' = {
+resource roleAssignment 'Microsoft.DocumentDB/databaseAccounts/sqlRoleAssignments@2024-05-15' = if (!empty(dataPlanePrincipalId)) {
   parent: account
   name: guid(account.id, dataPlanePrincipalId, 'data-contributor')
   properties: {

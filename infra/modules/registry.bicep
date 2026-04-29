@@ -12,8 +12,8 @@ param location string
 @description('Tags.')
 param tags object = {}
 
-@description('Principal (object) ID granted AcrPull on this registry.')
-param acrPullPrincipalId string
+@description('Optional principal granted inline AcrPull. Empty string skips. Other principals get AcrPull via acr-role-assignment.bicep.')
+param acrPullPrincipalId string = ''
 
 resource acr 'Microsoft.ContainerRegistry/registries@2023-11-01-preview' = {
   name: name
@@ -34,7 +34,7 @@ var acrPullRoleDefinitionId = subscriptionResourceId(
   '7f951dda-4ed3-4680-a7ca-43fe172d538d'
 )
 
-resource acrPull 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+resource acrPull 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (!empty(acrPullPrincipalId)) {
   scope: acr
   name: guid(acr.id, acrPullPrincipalId, 'AcrPull')
   properties: {

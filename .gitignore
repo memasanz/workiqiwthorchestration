@@ -77,6 +77,8 @@ infra/**/main.parameters.local.json
 azd-cache/
 
 # --- Secrets, app-reg outputs, local config ---
+scripts/admin/.app-reg-output.json
+scripts/admin/.*.json
 scripts/iter5-app-reg-output.json
 scripts/*-output.json
 *.pfx
@@ -116,3 +118,4 @@ docs/_build/
 .LSOverride
 ehthumbs.db
 $RECYCLE.BIN/
+

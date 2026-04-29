@@ -1,0 +1,67 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/Azure/azure-dev/main/schemas/v1.0/azure.yaml.json
+
+name: multipersonworkflow
+metadata:
+  template: multipersonworkflow@1.0.0
+
+infra:
+  provider: bicep
+  path: infra
+  module: main
+
+services:
+  chat-api:
+    project: ./chat-api
+    language: docker
+    host: containerapp
+    docker:
+      remoteBuild: true
+
+  chat-ui:
+    project: ./chat-ui
+    language: docker
+    host: containerapp
+    docker:
+      remoteBuild: true
+
+  mcp-server:
+    project: ./mcp-server
+    language: docker
+    host: containerapp
+    docker:
+      remoteBuild: true
+
+hooks:
+  postprovision:
+    windows:
+      shell: pwsh
+      run: ./scripts/post-provision/register_agents.ps1
+      continueOnError: false
+      interactive: true
+    posix:
+      shell: pwsh
+      run: ./scripts/post-provision/register_agents.ps1
+      continueOnError: false
+      interactive: true
+  predeploy:
+    windows:
+      shell: pwsh
+      run: ./scripts/pre-deploy/write_chat_ui_env.ps1
+      continueOnError: false
+      interactive: true
+    posix:
+      shell: pwsh
+      run: ./scripts/pre-deploy/write_chat_ui_env.ps1
+      continueOnError: false
+      interactive: true
+  postdeploy:
+    windows:
+      shell: pwsh
+      run: ./scripts/post-deploy/fanout_mcp_image.ps1
+      continueOnError: false
+      interactive: true
+    posix:
+      shell: pwsh
+      run: ./scripts/post-deploy/fanout_mcp_image.ps1
+      continueOnError: false
+      interactive: true

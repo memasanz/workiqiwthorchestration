@@ -33,7 +33,7 @@ async def lifespan(app: FastAPI):
 
 
 def create_app() -> FastAPI:
-    app = FastAPI(title="multipersonworkflow chat-api", version="0.8.7", lifespan=lifespan)
+    app = FastAPI(title="multipersonworkflow chat-api", version="0.9.2", lifespan=lifespan)
     app.add_middleware(
         CORSMiddleware,
         allow_origins=["*"],  # dev: tighten before production

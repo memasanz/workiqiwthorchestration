@@ -65,12 +65,12 @@ resource app 'Microsoft.App/containerApps@2024-03-01' = {
           }
         ]
       }
-      registries: imageInAcr ? [
+      registries: [
         {
           server: registryLoginServer
           identity: userAssignedIdentityId
         }
-      ] : []
+      ]
     }
     template: {
       containers: [

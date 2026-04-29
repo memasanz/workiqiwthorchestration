@@ -1,92 +1,88 @@
-"""Create or update the Tax SME Foundry agent.
+"""Create or update the Tax SME Foundry agent. Idempotent on AGENT_NAME.
 
-Idempotent: looks up an existing agent by name and creates a new version,
-otherwise creates the first version.
+Reads from environment so the same script works against any project:
+  FOUNDRY_PROJECT_ENDPOINT
+  MODEL_DEPLOYMENT_NAME
+  TAX_MCP_URL
 """
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
-from azure.ai.projects import AIProjectClient
-from azure.ai.projects.models import MCPTool, PromptAgentDefinition
-from azure.identity import DefaultAzureCredential
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-PROJECT_ENDPOINT = (
-    "https://aif-mpwflow-dev-a3qzr7isqw476.services.ai.azure.com"
-    "/api/projects/proj-mpwflow-dev"
-)
-MODEL_DEPLOYMENT_NAME = "gpt-5_3-chat"
-MCP_SERVER_URL = (
-    "https://ca-mpwflow-dev-mcp-tax.icyground-4e2c6fde.eastus2.azurecontainerapps.io/mcp"
-)
-MCP_SERVER_LABEL = "mpwflow"
+from azure.ai.projects.models import MCPTool, PromptAgentDefinition  # noqa: E402
+
+from shared.foundry_client import get_project_client  # noqa: E402
+
 AGENT_NAME = "tax-sme-agent"
+MCP_SERVER_LABEL = "mpwflow"
 
-# WorkIQ "Me" MCP server (Microsoft Agent 365). Uses a Foundry project
-# connection so identity passthrough is handled by the connection config.
-WORKIQ_MCP_SERVER_URL = "https://agent365.svc.cloud.microsoft/agents/servers/mcp_MeServer"
-WORKIQ_MCP_SERVER_LABEL = "WorkIQUser"
-WORKIQ_MCP_CONNECTION_ID = "WorkIQUser"
+WORKIQ_USER_URL = "https://agent365.svc.cloud.microsoft/agents/servers/mcp_MeServer"
+WORKIQ_USER_LABEL = "WorkIQUser"
+WORKIQ_USER_CONNECTION_ID = "WorkIQUser"
 
-# WorkIQ "Mail" MCP server (Microsoft Agent 365). Same identity model as
-# WorkIQUser — Foundry connection handles per-user OBO. Lets agents search
-# the SME's mailbox for relevant prior context before drafting.
-WORKIQ_MAIL_MCP_SERVER_URL = "https://agent365.svc.cloud.microsoft/agents/servers/mcp_MailTools"
-WORKIQ_MAIL_MCP_SERVER_LABEL = "WorkIQMail"
-WORKIQ_MAIL_MCP_CONNECTION_ID = "WorkIQMail"
+WORKIQ_MAIL_URL = "https://agent365.svc.cloud.microsoft/agents/servers/mcp_MailTools"
+WORKIQ_MAIL_LABEL = "WorkIQMail"
+WORKIQ_MAIL_CONNECTION_ID = "WorkIQMail"
 
 
-def load_instructions() -> str:
-    return (Path(__file__).parent / "system_prompt.md").read_text(encoding="utf-8")
+def _require_env(name: str) -> str:
+    val = os.environ.get(name, "").strip()
+    if not val:
+        sys.stderr.write(f"ERROR: required env var {name!r} is not set.\n")
+        sys.exit(2)
+    return val
 
 
 def main() -> int:
-    # chat-api 0.3.0: PromptAgent wires its MCP backend server-side because
-    # Foundry rejects client-side tools when an agent is specified.
-    instructions = load_instructions()
+    endpoint = _require_env("FOUNDRY_PROJECT_ENDPOINT")
+    model = _require_env("MODEL_DEPLOYMENT_NAME")
+    mcp_url = _require_env("TAX_MCP_URL")
+    instructions = (Path(__file__).parent / "system_prompt.md").read_text(encoding="utf-8")
 
-    client = AIProjectClient(
-        endpoint=PROJECT_ENDPOINT,
-        credential=DefaultAzureCredential(),
-    )
+    print(f"endpoint:   {endpoint}")
+    print(f"model:      {model}")
+    print(f"MCP server: {mcp_url}")
 
-    mcp_tool = MCPTool(
-        server_label=MCP_SERVER_LABEL,
-        server_url=MCP_SERVER_URL,
-        require_approval="never",
-    )
+    project = get_project_client(endpoint)
+    with project:
+        mcp_tool = MCPTool(
+            server_label=MCP_SERVER_LABEL,
+            server_url=mcp_url,
+            require_approval="never",
+        )
 
-    workiq_mcp_tool = MCPTool(
-        server_label=WORKIQ_MCP_SERVER_LABEL,
-        server_url=WORKIQ_MCP_SERVER_URL,
-        require_approval="never",
-        project_connection_id=WORKIQ_MCP_CONNECTION_ID,
-    )
+        workiq_user_tool = MCPTool(
+            server_label=WORKIQ_USER_LABEL,
+            server_url=WORKIQ_USER_URL,
+            require_approval="never",
+            project_connection_id=WORKIQ_USER_CONNECTION_ID,
+        )
 
-    workiq_mail_mcp_tool = MCPTool(
-        server_label=WORKIQ_MAIL_MCP_SERVER_LABEL,
-        server_url=WORKIQ_MAIL_MCP_SERVER_URL,
-        require_approval="never",
-        project_connection_id=WORKIQ_MAIL_MCP_CONNECTION_ID,
-    )
+        workiq_mail_tool = MCPTool(
+            server_label=WORKIQ_MAIL_LABEL,
+            server_url=WORKIQ_MAIL_URL,
+            require_approval="never",
+            project_connection_id=WORKIQ_MAIL_CONNECTION_ID,
+        )
 
-    definition = PromptAgentDefinition(
-        model=MODEL_DEPLOYMENT_NAME,
-        instructions=instructions,
-        tools=[mcp_tool, workiq_mcp_tool, workiq_mail_mcp_tool],
-    )
+        definition = PromptAgentDefinition(
+            model=model,
+            instructions=instructions,
+            tools=[mcp_tool, workiq_user_tool, workiq_mail_tool],
+        )
 
-    agent = client.agents.create_version(
-        agent_name=AGENT_NAME,
-        definition=definition,
-    )
+        agent = project.agents.create_version(
+            agent_name=AGENT_NAME,
+            definition=definition,
+        )
 
-    print(f"Agent name:    {agent.name}")
-    print(f"Agent id:      {getattr(agent, 'id', '<n/a>')}")
-    print(f"Agent version: {getattr(agent, 'version', '<n/a>')}")
-    print(f"Model:         {MODEL_DEPLOYMENT_NAME}")
-    print(f"MCP server:    {MCP_SERVER_URL}")
+        print(f"Agent name:    {agent.name}")
+        print(f"Agent id:      {getattr(agent, 'id', '<n/a>')}")
+        print(f"Agent version: {getattr(agent, 'version', '<n/a>')}")
     return 0
 
 
